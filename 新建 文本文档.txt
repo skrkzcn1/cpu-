@@ -1,0 +1,363 @@
+
+题 01｜环境自检：Verilator + RISC‑V 工具链 + 运行最小程序
+- 目标：能把 RISC‑V 程序编译为 hex 并用 Verilator 跑通“内存读+打印”。
+- 背景：后续所有仿真都依赖工具链和内存镜像流转。
+- 需求：
+  - 安装 riscv32-unknown-elf-{gcc,ld,objcopy} 与 Verilator。
+  - 写脚本 scripts/build_hex.py：输入 ELF，输出 mem.hex（32 位小端，按字对齐）。
+  - 提供最小汇编 tests/hello.S：把常数 0x12345678 写到 0x8000_0000（模拟 UART）。
+  - 写最小顶层 sim/top_min.sv：从 mem.hex 读出并“打印”写到 UART 的值。
+- 交付物：脚本、最小顶层、hello.S、mem.hex。
+- 判定标准：在仿真日志看到 0x12345678；脚本处理任意 ELF。
+- 测试：python3 scripts/build_hex.py hello.elf -> mem.hex；make verilate 运行 top_min。
+- 提示：objcopy --output-target=verilog 可直接导出，但自己转更灵活。
+- 加分：在 sim 用 Python/C++ 驱动器解析 UART 输出为 ASCII。
+
+题 02｜ELF 裁剪与内存布局工具
+- 目标：正确生成 .text/.data/.bss 的合并 hex，并支持起始地址配置。
+- 背景：CPU 从 0x0000_0000 或 0x8000_0000 启动，加载器需灵活。
+- 需求：
+  - 脚本支持参数：--base 0x80000000，--word-bytes 4，--fill 0x00。
+  - 自动探测段地址，按地址对齐、空洞用 --fill 填充。
+- 交付物：scripts/elf2hex.py，README。
+- 判定标准：对齐正确，随机字节校验通过（给对比器）。
+- 测试：对同一 ELF，多 base 验证首地址偏移是否正确。
+- 提示：用 pyelftools 读取段表。
+- 加分：支持生成 IROM/DROM 分离的 mem 文件。
+
+题 03｜背单词卡：RV32I 指令编码与立即数
+- 目标：能“凭空写出”I/S/B/U/J 五种格式的位段定义与示例。
+- 背景：译码/立即数模块全靠这张脑内表。
+- 需求：
+  - 在 docs/rv32i_cards.md 写出：
+    - 五种格式的 [31:0] 位段图、opcode/funct3/funct7。
+    - 10 条示例指令的机器码与对应语义（如 addi x1,x0,1 -> 0x00100093）。
+- 交付物：md 文档。
+- 判定标准：自测脚本比对 10 条示例的机器码与解析出的字段一致。
+- 测试：写 scripts/check_cards.py 解析并比对。
+- 提示：B/J 的立即数拼接最易错，注意符号扩展。
+- 加分：附上 RV32M 编码表（mul/div）。
+
+题 04｜背单词卡：五级流水与冒险类型
+- 目标：写清 IF/ID/EX/MEM/WB 的职责、冒险类型与解决策略。
+- 背景：后续 hazard/forwarding 都要用。
+- 需求：
+  - docs/pipeline_cards.md：
+    - 每级输入输出信号清单（含样例：pc、instr、ctrl、rs1/rs2、imm、alu_res、mem_req、wb_data）。
+    - 数据相关 RAW/WAR/WAW；控制冒险；结构冒险定义；解决手段（stall/flush/forward）。
+- 交付物：md 文档。
+- 判定标准：评审时口述不借助资料也能还原图和策略。
+- 测试：无。
+- 提示：本科核最常见：RAW + 控制冒险。
+- 加分：列出各类冒险的最小复现序列（指令对）。
+
+题 05｜模块：寄存器堆（RegFile）
+- 目标：实现 32×32 位寄存器，x0 恒为 0；1 写 2 读，写优先。
+- 背景：CPU 的通用寄存器。
+- 接口：
+  - module regfile(input clk, input we, input [4:0] wa, input [31:0] wd, input [4:0] ra1, ra2, output [31:0] rd1, rd2);
+- 需求：同步写、组合读；写 x0 忽略；同周期写后读同地址读到新值（写优先）。
+- 交付物：rtl/core/regfile.sv + test。
+- 判定标准：随机写读 10k 次，全通过；x0 永为 0。
+- 测试：cocotb/Verilator 随机测试，覆盖同地址写读。
+- 提示：写优先可用旁路或时序安排。
+- 加分：两口同时写冲突时的处理策略与断言。
+
+题 06｜模块：立即数生成器（ImmGen）
+- 目标：从 instr[31:0] 生成 I/S/B/U/J 的 32 位有符号立即数。
+- 接口：
+  - module immgen(input [31:0] instr, output logic [31:0] imm, output logic valid, output logic [2:0] type);
+- 需求：按 opcode 判别类型；非法则 valid=0。
+- 交付物：rtl/core/immgen.sv + 单元测试。
+- 判定标准：对 20 条机器码，立即数与类型正确。
+- 测试：覆盖负数、最大偏移、B/J 拼接。
+- 提示：B/J 低位补 0；最高位符号扩展。
+- 加分：支持 AUIPC 的 PC 相对计算演示。
+
+题 07｜模块：ALU
+- 目标：支持 RV32I 核心算术/逻辑/移位/比较。
+- 接口：
+  - module alu(input [31:0] a,b, input [4:0] op, output logic [31:0] y, output logic cmp_taken);
+- 需求：op 覆盖 add/sub/and/or/xor/sll/srl/sra/slt/sltu；cmp_taken 用于分支。
+- 交付物：rtl/core/alu.sv + 随机测试。
+- 判定标准：和黄金参考（Python）一致，1e5 次随机。
+- 测试：随机有符号/无符号比较边界值。
+- 提示：移位用 b[4:0]。
+- 加分：输出零标志/溢出标志。
+
+题 08｜模块：分支条件比较器（BrCond）
+- 目标：从 rs1/rs2 与 funct3 生成分支结果。
+- 接口：
+  - module brcond(input [31:0] rs1,rs2, input [2:0] funct3, output logic take);
+- 需求：支持 BEQ/BNE/BLT/BGE/BLTU/BGEU。
+- 交付物：rtl/core/brcond.sv + 用例。
+- 判定标准：边界值覆盖，通过。
+- 测试：相等/最大最小/符号边界。
+- 提示：有符号比较需 $signed。
+- 加分：将其合入 ALU，减少模块数。
+
+题 09｜模块：取指单元 IF（最简版）
+- 目标：实现 PC 递增取指，支持同步 ROM。
+- 接口：
+  - module ifu_min(input clk, input rst, output logic [31:0] pc, input [31:0] instr, output logic [31:0] pc_next);
+- 需求：pc 初始为参数 START_PC；pc_next=pc+4；外部提供 instr。
+- 交付物：rtl/core/ifu_min.sv + mem_rom.sv + 测试。
+- 判定标准：按 mem.hex 顺序取指，pc 递增正确。
+- 测试：手写 5 条 NOP + JAL 跳转。
+- 提示：之后会替换为 I-Cache+预测。
+- 加分：支持简单跳转指令 jal/jalr 的 pc 计算（不含预测，只后端修正）。
+
+题 10｜模块：译码与控制器（Decoder + Ctrl）
+- 目标：把 instr→控制信号，包含寄存器读写、ALU 选择、访存信息等。
+- 接口：
+  - module decoder(input [31:0] instr, output logic uses_rs1, uses_rs2, output logic [4:0] alu_op, output logic alu_src1_pc, alu_src2_imm, output logic is_branch, is_jal, is_jalr, output logic mem_read, mem_write, output logic [1:0] mem_size, mem_sext, output logic reg_write, output logic wb_sel_mem, wb_sel_pc4);
+- 需求：覆盖 RV32I 全部指令。
+- 交付物：rtl/core/decoder.sv + 真值表测试（指令→控制）。
+- 判定标准：50 条混合指令控制信号正确。
+- 测试：随机生成合法指令与黄金参考对比。
+- 提示：wb_sel 优先级：mem > pc+4 > alu。
+- 加分：输出非法指令标志并计数。
+
+题 11｜模块：通用流水寄存器（PipeReg）
+- 目标：带 en/stall/flush 的通用寄存器打拍。
+- 接口：
+  - module pipereg #(parameter W=64)(input clk,input rst,input en,input flush,input [W-1:0] din, output logic [W-1:0] dout);
+- 需求：flush 优先于 en，flush→dout=0。
+- 交付物：rtl/core/pipereg.sv + 单测。
+- 判定标准：随机时序下行为正确。
+- 测试：覆盖 flush 与 en 冲突。
+- 提示：为四个级间寄存器复用。
+- 加分：支持位宽分段（结构体）清零。
+
+题 12｜组装：无冒险五级流水（假设无相关）
+- 目标：拼出 IF/ID/EX/MEM/WB 的基本通路，零延迟内存，禁用 hazard。
+- 背景：先跑通“无相关”的程序。
+- 需求：
+  - 组件：ifu_min + decoder + regfile + immgen + alu + brcond + 简单 dmem（组合读写）。
+  - 不处理相关与分支：保证测试程序无相关。
+- 交付物：rtl/core/rvcore_naive.sv + tests/naive.S。
+- 判定标准：能正确执行加法累加等无相关程序，最终寄存器值匹配。
+- 测试：for 循环展平、加常数。
+- 提示：先跑通，再加 hazard。
+- 加分：加入 jal/jalr 并在 EX 修正 pc（整条 flush）。
+
+题 13｜模块：总线接口 SimpleBus 与同步内存模型
+- 目标：定义并实现一个“一发一应、可配置延迟”的简易总线。
+- 接口（主设备侧，CPU/Cache 使用）：
+  - req_valid, req_ready, req_addr[31:0], req_write, req_wstrb[3:0], req_wdata[31:0]; resp_valid, resp_rdata[31:0]
+  - 约束：最多 1 个在途请求；读写互斥；握手 req_valid && req_ready。
+- 需求：rtl/bus/simplebus_if.sv（接口包）、rtl/bus/mem_model.sv（延迟 LAT 周期、可设随机延迟、大小端小端）。
+- 交付物：接口与内存模型。
+- 判定标准：随机流量读写一致；写掩码正确。
+- 测试：随机写掩码、未对齐写拒绝（或对齐）。
+- 提示：后续 Cache 与主存就靠它了。
+- 加分：统计吞吐与平均延迟。
+
+题 14｜模块：LSU（Load/Store Unit）
+- 目标：从 EX 结果产生对 SimpleBus 的读写请求，完成对齐/扩展。
+- 接口：
+  - module lsu(input clk,rst, input do_load,do_store, input [1:0] size, input sext, input [31:0] addr, wdata, output logic busy, output logic [31:0] rdata, simplebus.master bus);
+- 需求：支持 LB/LH/LW/SB/SH/SW；未对齐策略：允许或报错（二选一，定义清楚）。
+- 交付物：rtl/core/lsu.sv + 单测。
+- 判定标准：对齐、掩码、符号扩展正确；随机测试过。
+- 测试：交叉大小与地址低位。
+- 提示：size=0/1/2 对应 1/2/4 字节。
+- 加分：简单写缓冲（1 深度），减小停顿。
+
+题 15｜单元：数据相关检测（Hazard Detect）
+- 目标：检测 load‑use 等 RAW，发出 stall/flush。
+- 接口：
+  - module hazard_detect(input id_uses_rs1, id_uses_rs2, input [4:0] id_rs1,id_rs2, input ex_mem_read, input [4:0] ex_rd, output logic stall_if,stall_id,flush_ex);
+- 需求：加载后立即用的插入 1 泡（气泡）；其它 RAW 由转发解决（下一题）。
+- 交付物：rtl/core/hazard_detect.sv + 例程。
+- 判定标准：经典序列 lw x1,0(x2); add x3,x1,x4 → 自动插泡。
+- 测试：列举 10 类组合，覆盖 x0。
+- 提示：写回阶段的 RAW 用转发更经济。
+- 加分：加入 MEM 阶段 load‑use 检测。
+
+题 16｜单元：转发（Forwarding Unit）
+- 目标：实现 EX/MEM/WB 三路转发，消除大部分 RAW。
+- 接口：
+  - module fwd_unit(input [4:0] id_rs1,id_rs2, ex_rd,mem_rd,wb_rd, input ex_we,mem_we,wb_we, output logic [1:0] fwd_a,fwd_b);
+- 需求：优先级 MEM>WB；对 x0 不转发。
+- 交付物：rtl/core/fwd_unit.sv + 序列测试。
+- 判定标准：覆盖 EX→EX、MEM→EX、WB→EX 等路径。
+- 测试：三连依赖链。
+- 提示：配合多路选择器选择 rs1/rs2 输入。
+- 加分：支持从 LSU 返回通路的转发。
+
+题 17｜单元：控制冒险（无预测）
+- 目标：在 EX 解析分支/跳转并修正 PC，清空错误路径。
+- 接口：
+  - 输入：ex_is_branch/jal/jalr、ex_target、ex_taken；输出：if_pc_redirect、redirect_pc、flush_ifid。
+- 需求：分支在 EX 决策，IF/ID flush 1 拍；测量 CPI 损失。
+- 交付物：rtl/core/ctrl_flow.sv + 测试。
+- 判定标准：所有分支与 jal/jalr 均能正确跳转；无指令乱序提交。
+- 测试：构造 50% 命中与 50% 失败混合序列。
+- 提示：jalr 目标需清除最低位。
+- 加分：统计分支条数与错误条数。
+
+题 18｜预测器 V1：BHT(2-bit) + 直接映射 BTB
+- 目标：加入最基础的动态预测减少 flush。
+- 接口：
+  - module bpu_simple(input clk,rst, input [31:0] if_pc, output logic pred_taken, output logic [31:0] pred_target, input resolve_valid, input [31:0] rs_pc,rs_target, input rs_taken, input is_jal,is_jalr,is_branch);
+- 需求：
+  - BHT：2-bit 饱和计数器，索引 if_pc[bits]。
+  - BTB：命中返回目标（分支/jal）；jalr 可选不缓存。
+  - 更新：在分支实际解析时更新 BHT/BTB。
+- 交付物：rtl/predictor/bpu_simple.sv + trace 测试。
+- 判定标准：给出固定分支模式（TTTTFFFF…），误判率曲线符合预期（收敛）。
+- 测试：提供分支轨迹文件，离线驱动。
+- 提示：BTB tag+valid 必须有，否则伪命中。
+- 加分：加入返回地址栈 RAS 处理 call/ret（见题 20）。
+
+题 19｜预测器 V2：GShare + 集成前端
+- 目标：实现 GShare（全局历史 XOR PC）并集成 IF 阶段。
+- 接口：
+  - module bpu_gshare(... 除上题外增加 global_history[GH-1:0]，参数 GH=8/10/12)。
+- 需求：
+  - GHR 与 BHT 索引：index = pc_bits ^ GHR。
+  - 流水化前端：IF 使用 pred_taken/target；EX 解析时修正与回滚 GHR（需注意投机历史）。
+- 交付物：rtl/predictor/bpu_gshare.sv + 集成到 rvcore。
+- 判定标准：在分支基准（如 simple loop/CRC）中，IPC 明显提升，相比题 18 下降误判率。
+- 测试：两类分支：循环型与两个循环嵌套型。
+- 提示：投机历史可乐观更新+回滚或延迟更新二选一。
+- 加分：TAGE‑lite（只需两表）或 BTB 设为 2‑way。
+
+题 20｜返回地址栈（RAS，可选加分）
+- 目标：提高函数返回的预测命中率。
+- 接口：
+  - module ras #(parameter DEPTH=8)(input clk,rst, input call,ret, input [31:0] call_retaddr, output logic [31:0] ret_target);
+- 需求：call 时 push pc+4；ret 时 pop 获取返回目标；与 BPU 融合。
+- 交付物：rtl/predictor/ras.sv + 单测。
+- 判定标准：递归/深度函数调用预测命中率提升。
+- 测试：构造深度 N 的递归。
+- 提示：栈下溢/上溢策略定义清楚。
+- 加分：与 BTB 冲突时优先 RAS。
+
+题 21｜I‑Cache：直接映射 4KB，16B 行
+- 目标：加入 I‑Cache，隐藏内存延迟。
+- 接口：
+  - module icache #(parameter LINES=256, LINE_BYTES=16)(input clk,rst, input fetch_req, input [31:0] fetch_addr, output logic fetch_ready, output logic [31:0] fetch_instr, simplebus.master imem);
+- 需求：有效位+tag+数据阵列；指令未命中触发整行填充；只读，不写。
+- 交付物：rtl/cache/icache.sv + 内存延迟模型下的测试。
+- 判定标准：在 mem LAT=10 下，命中时每拍取一条指令；统计命中率。
+- 测试：顺序取指与跳转混合。
+- 提示：对齐到行，低位为块内偏移。
+- 加分：2‑way 组相联 + LRU（1 bit）。
+
+题 22｜D‑Cache：直接映射 4KB，写回/写分配
+- 目标：加入 D‑Cache，支持读写、行填充与回写。
+- 接口：
+  - module dcache #(LINE_BYTES=16)(input clk,rst, input lsu_req, input is_load,is_store, input [1:0] size, input sext, input [31:0] addr,wdata, output logic lsu_ready, output logic [31:0] rdata, simplebus.master dmem);
+- 需求：dirty/valid/tag；写回状态机；行内字节写掩码；阻塞式（miss 期间暂停 lsu）。
+- 交付物：rtl/cache/dcache.sv + 全覆盖测试。
+- 判定标准：随机读写、跨行、回写路径正确；命中率统计可用。
+- 测试：流式读、点更新写、跨行写。
+- 提示：写分配比直写更贴近 CPU Cache。
+- 加分：1 深度写缓冲器缓解命中写延迟。
+
+题 23｜Stride 预取器（集成 D‑Cache）
+- 目标：实现简单 stride 预取：按 PC 或地址历史预测下一条地址。
+- 接口：
+  - module prefetch_stride(input clk,rst, input acc_valid, input [31:0] pc,addr, input miss, output logic pf_req, output logic [31:0] pf_addr);
+- 需求：
+  - 每个 PC 维护最近两次 miss 地址，若 stride 稳定则预取下一行。
+  - 与 dcache 协同：pf_req 走独立端口或排队到相同总线（串行）。
+- 交付物：rtl/cache/prefetch_stride.sv + 集成代码。
+- 判定标准：流式访问（如 memcpy）带宽提升明显；预取准确率>70%（可配置）。
+- 测试：Stride 正常/变化/随机三类访问。
+- 提示：避免越界与污染（限深度/黑名单）。
+- 加分：给 I‑Cache 也加 next‑line 预取对比。
+
+题 24｜性能与事件计数器
+- 目标：加上 cycle、instret、branch 总/错、ic/dc hit/miss 等计数器。
+- 接口：
+  - memory‑mapped CSR（自定义）：基地址 0xF000_0000，偏移分配各计数器，读清或写清可选。
+- 需求：不影响关键路径；读一致。
+- 交付物：rtl/core/perf_counters.sv + 文档/地址表。
+- 判定标准：与离线统计一致误差<1%。
+- 测试：固定脚本跑相同程序两次比对。
+- 提示：把统计点绑定到明确事件（握手/命中信号）。
+- 加分：导出 JSON 报告（scripts/gen_report.py）。
+
+题 25｜微基准压测脚本与报告
+- 目标：构建一组可重复的微基准并自动产出 IPC/命中率/误判率。
+- 需求：
+  - tests/micro：stream、pointer‑chasing、branch‑heavy、mix。
+  - scripts/run_bench.py：构建→仿真→解析 perf CSR→生成表格与图。
+- 交付物：基准源代码+脚本+报告（docs/micro_report.md）。
+- 判定标准：能比较“无预测 vs GShare”、“无 Cache vs 有 Cache vs 预取”的差异。
+- 测试：至少 4 个用例各 3 次取均值。
+- 提示：固定随机种子；Warm‑up。
+- 加分：输出火焰图风格的流水级别占用率（粗粒度）。
+
+题 26｜Embench 子集跑通
+- 目标：能在仿真里运行 Embench 的若干小程序并输出校验。
+- 背景：Embench 可配置 RV32I，适合无操作系统裸机。
+- 需求：
+  - 移植最小启动与链接脚本（sw/embench/）。
+  - UART 驱动：把结果与 checksum 打印出来。
+- 交付物：编译脚本、二进制、运行日志。
+- 判定标准：至少 5 个用例 checksum 匹配官方值。
+- 测试：crc32、ud、aha‑mont64 等。
+- 提示：栈/堆区间设置要和内存模型一致。
+- 加分：记录每个用例 IPC 与命中率。
+
+题 27｜CoreMark 跑通与成绩记录
+- 目标：在仿真环境下跑完 CoreMark 并打印 Iterations/Sec（仿真时换算）。
+- 需求：
+  - 移植 bare‑metal 移植层；定时器可用 cycle 计数换算虚拟时间。
+- 交付物：运行日志、score 计算脚本。
+- 判定标准：结果稳定；重跑三次方差小。
+- 测试：不同编译选项 -O2/-O3。
+- 提示：开启 IM 扩展（如果实现了 MUL）会提分。
+- 加分：对比开启/关闭预测与预取的分数变化。
+
+题 28｜FPGA 顶层 + UART + 上板自检
+- 目标：把 CPU+Cache 集成为可上板的 SoC，串口打印“PASS”。
+- 背景：展示必备。
+- 需求：
+  - 顶层：时钟复位、片上 BRAM 作为 I/D 主存、UART TX、简单 GPIO LED。
+  - 约束文件与频率目标（如 50/100MHz）。
+- 交付物：rtl/top/top_fpga.sv、xdc/qsf、板上演示程序。
+- 判定标准：上电后串口看到“hello + 校验 PASS”，LED 闪烁。
+- 测试：下载 bit 后串口收日志。
+- 提示：先把 mem_model 替换为 BRAM 控制器；减少多余调试信号。
+- 加分：加入仿真/上板同一固件一键打包与下载脚本。
+
+题 29｜FPGA 性能与资源测量
+- 目标：统计 FPGA 上的 Fmax、LUT/FF/BRAM 使用，记录与设计决策对应关系。
+- 需求：
+  - 不同配置编译：无预测/有预测、无 Cache/有 Cache/预取。
+  - docs/fpga_report.md：表格化记录。
+- 交付物：综合报告、时序截图。
+- 判定标准：能解释关键路径（如 D‑Cache 状态机、预测前端）。
+- 测试：在不同时钟约束下观察收敛。
+- 提示：必要时在关键路径加寄存器切分。
+- 加分：给出“性能—面积”帕累托前沿图。
+
+题 30｜收尾：论文图表与演示脚本
+- 目标：把毕设需要的图文材料统一输出。
+- 需求：
+  - docs/paper_figs：微架构图（前端、预测、Cache）、状态机图、流程图。
+  - scripts/export_plots.py：从 JSON 报告导出所有图（命中率、误判率、IPC、资源）。
+  - 演示视频脚本（1–2 分钟）：结构→指标→对比→上板画面。
+- 交付物：图、表、脚本与讲稿。
+- 判定标准：老师看图能理解你的“Intel 味儿”设计点。
+- 测试：自检过一次全流程拍屏。
+- 提示：把失败尝试也写上（如 TAGE‑lite 未调优）。
+- 加分：开源仓库 README 规范，附快速开始。
+
+——
+
+说明与统一规范（供每题引用）
+- 指令集：RV32I 必选，RV32M 可选（CoreMark 加分）。
+- 五级流水：IF/ID/EX/MEM/WB；流水寄存器统一用 pipereg。
+- 总线：SimpleBus（单在途，读写互斥）；I‑Cache 和 D‑Cache 各有一主口连到 mem_model（仿真）或 BRAM 控制器（上板）。
+- 性能指标：
+  - IPC = instret/cycle（仿真时去掉冷启动前 N 条）
+  - 分支误判率 = mispred/branches
+  - Cache 命中率 = hits/(hits+misses)
+  - 资源/频率：FPGA 报告为准
+- 工具链建议：Verilator + cocotb/pytest、RISC‑V GCC、Python 脚本链一键跑全套。
